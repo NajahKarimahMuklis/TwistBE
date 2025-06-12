@@ -12,9 +12,10 @@ export interface UserProfile {
 }
 
 export interface UpdateProfileRequest {
-  displayName?: string;
-  bio?: string;
-  email?: string;
+  displayName: string;
+  username: string,
+  bio: string;
+  email: string;
 }
 
 export interface SearchUsersQuery {

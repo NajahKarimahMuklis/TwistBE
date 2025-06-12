@@ -1,44 +1,48 @@
-import { PrismaClient } from "../generated/prisma";
+import { prisma } from "../application/database";
 import {
   UpdateProfileRequest,
   UserProfile,
+  PaginationQuery,
   UserSettingsRequest,
   UserSearchResult,
-} from "../model/user.types";
-import { PaginationQuery } from "../model/paging";
+  SearchUsersQuery,
+} from "../model/user.types"; // Pastikan path ini benar
 
-const prisma = new PrismaClient();
+// Objek select standar untuk data user yang aman dan bersifat publik.
+const userPublicSelect = {
+  id: true,
+  username: true,
+  email: true,
+  displayName: true,
+  bio: true,
+  followerCount: true,
+  followingCount: true,
+  createdAt: true,
+  isVerified: true,
+};
 
 export class UserService {
+  /**
+   * Mengambil profil publik satu user dan status follow dari user saat ini.
+   */
   static async getProfile(
     userId: number,
     currentUserId?: number
-  ): Promise<UserProfile> {
+  ): Promise<UserProfile | null> {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        displayName: true,
-        bio: true,
-        followerCount: true,
-        followingCount: true,
-        createdAt: true,
-        isVerified: true,
-      },
+      select: userPublicSelect,
     });
 
-    if (!user) throw new Error("User not found");
+    if (!user) {
+      return null;
+    }
 
     let isFollowing = false;
     if (currentUserId && currentUserId !== userId) {
       const follow = await prisma.follower.findUnique({
         where: {
-          userId_followingId: {
-            userId: currentUserId,
-            followingId: userId,
-          },
+          userId_followingId: { userId: currentUserId, followingId: userId },
         },
       });
       isFollowing = !!follow;
@@ -47,28 +51,20 @@ export class UserService {
     return { ...user, isFollowing };
   }
 
+  /**
+   * Memperbarui profil pengguna yang sedang login.
+   */
   static async updateProfile(
     userId: number,
     data: UpdateProfileRequest
   ): Promise<UserProfile> {
     try {
-      const user = await prisma.user.update({
+      const updatedUser = await prisma.user.update({
         where: { id: userId },
         data,
-        select: {
-          id: true,
-          username: true,
-          email: true,
-          displayName: true,
-          bio: true,
-          followerCount: true,
-          followingCount: true,
-          createdAt: true,
-          isVerified: true,
-        },
+        select: userPublicSelect,
       });
-
-      return user;
+      return updatedUser;
     } catch (err: any) {
       if (err.code === "P2002") {
         throw new Error("Username atau email sudah digunakan");
@@ -77,27 +73,118 @@ export class UserService {
     }
   }
 
+  /**
+   * Menghapus akun pengguna dan semua data terkaitnya secara permanen.
+   */
+  static async deleteUser(userId: number): Promise<boolean> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return false;
+
+    await prisma.$transaction([
+      prisma.like.deleteMany({ where: { userId } }),
+      prisma.comment.deleteMany({ where: { userId } }),
+      prisma.repost.deleteMany({ where: { userId } }),
+      prisma.follower.deleteMany({
+        where: { OR: [{ userId }, { followingId: userId }] },
+      }),
+      prisma.refreshToken.deleteMany({ where: { userId } }),
+      prisma.post.deleteMany({ where: { userId } }),
+      prisma.user.delete({ where: { id: userId } }),
+    ]);
+
+    return true;
+  }
+
+  /**
+   * Mengambil daftar followers dengan paginasi.
+   */
+  static async getFollowers(userId: number, pagination: PaginationQuery) {
+    const { page = 1, limit = 20 } = pagination;
+    const skip = (page - 1) * limit;
+    const whereClause = { followingId: userId };
+
+    const [followers, total] = await prisma.$transaction([
+      prisma.follower.findMany({
+        where: whereClause,
+        include: { follower: { select: userPublicSelect } },
+        take: limit,
+        skip: skip,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.follower.count({ where: whereClause }),
+    ]);
+
+    return { data: followers.map((f) => f.follower), total };
+  }
+
+  /**
+   * Mengambil daftar orang yang di-follow dengan paginasi.
+   */
+  static async getFollowing(userId: number, pagination: PaginationQuery) {
+    const { page = 1, limit = 20 } = pagination;
+    const skip = (page - 1) * limit;
+    const whereClause = { userId: userId };
+
+    const [following, total] = await prisma.$transaction([
+      prisma.follower.findMany({
+        where: whereClause,
+        include: { following: { select: userPublicSelect } },
+        take: limit,
+        skip: skip,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.follower.count({ where: whereClause }),
+    ]);
+
+    return { data: following.map((f) => f.following), total };
+  }
+
+  /**
+   * Mencari pengguna berdasarkan username atau displayName.
+   */
+  static async searchUsers(query: SearchUsersQuery) {
+    const { q, limit = 10, offset = 0 } = query;
+    const whereClause = {
+      OR: [
+        { username: { contains: q, mode: "insensitive" as const } },
+        { displayName: { contains: q, mode: "insensitive" as const } },
+      ],
+      isActive: true,
+    };
+
+    const [users, total] = await prisma.$transaction([
+      prisma.user.findMany({
+        where: whereClause,
+        select: { id: true, username: true, displayName: true },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.user.count({ where: whereClause }),
+    ]);
+
+    return { data: users, total };
+  }
+
+  /**
+   * Logika untuk follow seorang pengguna.
+   */
   static async followUser(userId: number, followingId: number): Promise<void> {
     if (userId === followingId) {
-      throw new Error("Cannot follow yourself");
+      throw new Error("Tidak bisa mem-follow diri sendiri");
     }
 
-    const existing = await prisma.follower.findUnique({
-      where: {
-        userId_followingId: {
-          userId,
-          followingId,
-        },
-      },
+    // Cek apakah sudah follow sebelumnya untuk menghindari duplikasi
+    const existingFollow = await prisma.follower.findUnique({
+      where: { userId_followingId: { userId, followingId } },
     });
 
-    if (existing) return;
+    if (existingFollow) {
+      return; // Jika sudah follow, tidak melakukan apa-apa
+    }
 
-    // Create follow relationship
+    // Gunakan transaksi untuk memastikan semua update count berhasil
     await prisma.$transaction([
-      prisma.follower.create({
-        data: { userId, followingId },
-      }),
+      prisma.follower.create({ data: { userId, followingId } }),
       prisma.user.update({
         where: { id: userId },
         data: { followingCount: { increment: 1 } },
@@ -109,103 +196,57 @@ export class UserService {
     ]);
   }
 
+  /**
+   * Logika untuk unfollow seorang pengguna.
+   */
   static async unfollowUser(
     userId: number,
     followingId: number
   ): Promise<void> {
-    const follow = await prisma.follower.findUnique({
-      where: {
-        userId_followingId: {
-          userId,
-          followingId,
-        },
-      },
+    // Gunakan transaksi untuk memastikan semua update count berhasil
+    // deleteMany akan mengembalikan jumlah record yang dihapus
+    const deleteResult = await prisma.$transaction(async (tx) => {
+      const deletedFollow = await tx.follower.deleteMany({
+        where: { userId, followingId },
+      });
+
+      if (deletedFollow.count > 0) {
+        await tx.user.update({
+          where: { id: userId },
+          data: { followingCount: { decrement: 1 } },
+        });
+        await tx.user.update({
+          where: { id: followingId },
+          data: { followerCount: { decrement: 1 } },
+        });
+      }
+      return deletedFollow;
     });
-
-    if (!follow) return;
-
-    await prisma.$transaction([
-      prisma.follower.delete({
-        where: { id: follow.id },
-      }),
-      prisma.user.update({
-        where: { id: userId },
-        data: { followingCount: { decrement: 1 } },
-      }),
-      prisma.user.update({
-        where: { id: followingId },
-        data: { followerCount: { decrement: 1 } },
-      }),
-    ]);
   }
 
-  static async getFollowers(
-    userId: number,
-    pagination: PaginationQuery
-  ): Promise<UserProfile[]> {
-    const followers = await prisma.follower.findMany({
-      where: { followingId: userId },
-      include: {
-        follower: {
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            displayName: true,
-            bio: true,
-            followerCount: true,
-            followingCount: true,
-            createdAt: true,
-            isVerified: true,
-          },
-        },
-      },
-      take: pagination.limit || 20,
-      skip: ((pagination.page || 1) - 1) * (pagination.limit || 20),
-    });
-
-    // FIXED: Changed from f.followers to f.follower
-    return followers.map((f) => f.follower);
-  }
-
-  static async getFollowing(
-    userId: number,
-    pagination: PaginationQuery
-  ): Promise<UserProfile[]> {
-    const following = await prisma.follower.findMany({
-      where: { userId },
-      include: {
-        following: {
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            displayName: true,
-            bio: true,
-            followerCount: true,
-            followingCount: true,
-            createdAt: true,
-            isVerified: true,
-          },
-        },
-      },
-      take: pagination.limit || 20,
-      skip: ((pagination.page || 1) - 1) * (pagination.limit || 20),
-    });
-
-    return following.map((f) => f.following);
-  }
-
+  /**
+   * Memperbarui pengaturan pengguna.
+   * Note: Berdasarkan skema, field 'isPrivate' tidak ada.
+   * Fungsi ini akan meng-handle field yang ada di UserSettingsRequest.
+   */
   static async updateSettings(
     userId: number,
     data: UserSettingsRequest
   ): Promise<void> {
     await prisma.user.update({
       where: { id: userId },
-      data,
+      data: {
+        displayName: data.displayName,
+        bio: data.bio,
+        email: data.email,
+        // Anda bisa menambahkan field lain di sini jika ada di skema
+      },
     });
   }
 
+  /**
+   * Mengambil daftar pengguna yang disarankan (misal, paling populer).
+   */
   static async getSuggestions(): Promise<UserSearchResult[]> {
     return prisma.user.findMany({
       where: { isActive: true },
@@ -219,42 +260,27 @@ export class UserService {
     });
   }
 
-  // ADDED: Missing getAllUsers method for controller
-  static async getAllUsers(): Promise<UserProfile[]> {
-    return await prisma.user.findMany({
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        displayName: true,
-        bio: true,
-        followerCount: true,
-        followingCount: true,
-        createdAt: true,
-        isVerified: true,
-      },
-    });
-  }
+  /**
+   * Mengambil daftar semua pengguna dengan paginasi (untuk admin).
+   */
+  static async getAllUsers(
+    pagination: PaginationQuery
+  ): Promise<{ data: UserProfile[]; total: number }> {
+    const { page = 1, limit = 20 } = pagination;
+    const skip = (page - 1) * limit;
+    const whereClause = { isActive: true };
 
-  // ADDED: Missing deleteUser method for controller
-  static async deleteUser(userId: number): Promise<boolean> {
-    const existingUser = await prisma.user.findUnique({
-      where: { id: userId },
-    });
+    const [users, total] = await prisma.$transaction([
+      prisma.user.findMany({
+        where: whereClause,
+        select: userPublicSelect,
+        take: limit,
+        skip: skip,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.user.count({ where: whereClause }),
+    ]);
 
-    if (!existingUser) {
-      return false; // user tidak ditemukan
-    }
-    
-    await prisma.refreshToken.deleteMany({
-      where: { userId },
-    });
-  
-
-    await prisma.user.delete({
-      where: { id: userId },
-    });
-
-    return true;
+    return { data: users, total };
   }
 }
