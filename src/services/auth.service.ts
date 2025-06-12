@@ -8,9 +8,6 @@ import {
   ResetPasswordInput,
 } from "../model/auth.types";
 
-/**
- * Mendaftarkan user baru dan langsung membuat sesi untuknya.
- */
 export const registerUserService = async (data: RegisterInput) => {
   const { username, email, password, confirmPassword } = data;
 
@@ -33,20 +30,10 @@ export const registerUserService = async (data: RegisterInput) => {
     data: { username, email, passwordHash },
   });
 
-  // Buat Access Token (berlaku singkat)
-  const accessToken = signJwt(
-    { id: user.id, username: user.username, type: "login" },
-    "15m"
-  );
+  const token = signJwt({ id: user.id, username: user.username, type: "login" }, "15m");
+  const refreshTokenExpiresInSeconds = 7 * 24 * 60 * 60;
+  const refreshToken = signJwt({ userId: user.id }, `${refreshTokenExpiresInSeconds}s`);
 
-  // Buat Refresh Token (berlaku panjang)
-  const refreshTokenExpiresInSeconds = 7 * 24 * 60 * 60; // 7 hari
-  const refreshToken = signJwt(
-    { userId: user.id },
-    `${refreshTokenExpiresInSeconds}s`
-  );
-
-  // Simpan refresh token ke database untuk keamanan
   await prisma.refreshToken.create({
     data: {
       token: refreshToken,
@@ -57,15 +44,12 @@ export const registerUserService = async (data: RegisterInput) => {
 
   return {
     user: { id: user.id, username: user.username, email: user.email },
-    accessToken,
+    token,
     refreshToken,
     refreshTokenExpiresIn: refreshTokenExpiresInSeconds,
   };
 };
 
-/**
- * Memvalidasi kredensial login dan membuat sesi baru.
- */
 export const loginUserService = async (data: LoginInput) => {
   const { username, password } = data;
 
@@ -86,20 +70,10 @@ export const loginUserService = async (data: LoginInput) => {
     throw new Error("Password salah");
   }
 
-  // Buat Access Token (berlaku singkat)
-  const accessToken = signJwt(
-    { id: user.id, username: user.username, type: "login" },
-    "15m"
-  );
+  const token = signJwt({ id: user.id, username: user.username, type: "login" }, "15m");
+  const refreshTokenExpiresInSeconds = 7 * 24 * 60 * 60;
+  const refreshToken = signJwt({ userId: user.id }, `${refreshTokenExpiresInSeconds}s`);
 
-  // Buat Refresh Token (berlaku panjang)
-  const refreshTokenExpiresInSeconds = 7 * 24 * 60 * 60; // 7 hari
-  const refreshToken = signJwt(
-    { userId: user.id },
-    `${refreshTokenExpiresInSeconds}s`
-  );
-
-  // Simpan refresh token ke database
   await prisma.refreshToken.create({
     data: {
       token: refreshToken,
@@ -110,54 +84,40 @@ export const loginUserService = async (data: LoginInput) => {
 
   return {
     user: { id: user.id, username: user.username, email: user.email },
-    accessToken,
+    token,
     refreshToken,
     refreshTokenExpiresIn: refreshTokenExpiresInSeconds,
   };
 };
 
-/**
- * Menghapus refresh token dari database saat logout.
- */
 export const logoutUserService = async (refreshToken: string) => {
-  return prisma.refreshToken.deleteMany({
-    where: { token: refreshToken },
-  });
+  return prisma.refreshToken.deleteMany({ where: { token: refreshToken } });
 };
 
-/**
- * Membuat Access Token baru menggunakan Refresh Token yang valid.
- */
 export const refreshAccessTokenService = async (token: string) => {
-  // 1. Verifikasi refresh token dan cek di database
-  const storedToken = await prisma.refreshToken.findUnique({
-    where: { token, expiresAt: { gt: new Date() } }, // Cek token & belum kedaluwarsa
+  const storedToken = await prisma.refreshToken.findFirst({
+    where: {
+      token,
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
   });
+  
 
   if (!storedToken) {
     throw new Error("Refresh token tidak valid atau sudah kedaluwarsa");
   }
 
-  // 2. Jika valid, buat access token baru
-  const user = await prisma.user.findUnique({
-    where: { id: storedToken.userId },
-  });
+  const user = await prisma.user.findUnique({ where: { id: storedToken.userId } });
   if (!user) {
     throw new Error("User tidak ditemukan");
   }
 
-  const newAccessToken = signJwt(
-    { id: user.id, username: user.username, type: "login" },
-    "15m"
-  );
-
-  return { accessToken: newAccessToken };
+  const newToken = signJwt({ id: user.id, username: user.username, type: "login" }, "15m");
+  return { token: newToken };
 };
 
-/**
- * Mengelola permintaan lupa password.
- * (Tidak ada perubahan, logika sudah tepat)
- */
 export const forgotPasswordService = async (data: ForgotPasswordInput) => {
   const { email } = data;
 
@@ -171,40 +131,21 @@ export const forgotPasswordService = async (data: ForgotPasswordInput) => {
     throw new Error("Email tidak terdaftar");
   }
 
-  const resetToken = signJwt(
-    {
-      id: user.id,
-      email: user.email,
-      type: "reset_password",
-    },
-    "1h" // expire 1 jam
-  );
-
-  const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
+  const resetToken = signJwt({ id: user.id, email: user.email, type: "reset_password" }, "1h");
+  const resetTokenExpiry = new Date(Date.now() + 3600000);
 
   await prisma.user.update({
     where: { id: user.id },
-    data: {
-      resetToken,
-      resetTokenExpiry,
-    },
+    data: { resetToken, resetTokenExpiry },
   });
 
-  console.log("=== RESET PASSWORD TOKEN (Development) ===");
-  console.log(
-    `Reset URL: http://localhost:3000/reset-password?token=${resetToken}`
-  );
-  console.log("==========================================");
-
   return {
-    message: "Link untuk reset password telah dikirim (cek konsol development)",
+    message: "Link untuk reset password telah dikirim",
+    resetToken,
+    resetLink: `http://localhost:3000/reset-password?token=${resetToken}`,
   };
 };
 
-/**
- * Mereset password user menggunakan token.
- * (Tidak ada perubahan, logika sudah tepat)
- */
 export const resetPasswordService = async (data: ResetPasswordInput) => {
   const { token, password, confirmPassword } = data;
 
@@ -226,38 +167,23 @@ export const resetPasswordService = async (data: ResetPasswordInput) => {
     }
 
     const user = await prisma.user.findFirst({
-      where: {
-        id: decoded.id,
-        resetToken: token,
-        resetTokenExpiry: { gt: new Date() },
-      },
+      where: { id: decoded.id, resetToken: token, resetTokenExpiry: { gt: new Date() } },
     });
 
     if (!user) {
-      throw new Error(
-        "Token reset password tidak valid atau sudah kedaluwarsa"
-      );
+      throw new Error("Token reset password tidak valid atau sudah kedaluwarsa");
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
     await prisma.user.update({
       where: { id: user.id },
-      data: {
-        passwordHash,
-        resetToken: null,
-        resetTokenExpiry: null,
-      },
+      data: { passwordHash, resetToken: null, resetTokenExpiry: null },
     });
 
-    return {
-      message: "Password berhasil direset",
-    };
+    return { message: "Password berhasil direset" };
   } catch (error: any) {
-    if (
-      error.name === "JsonWebTokenError" ||
-      error.name === "TokenExpiredError"
-    ) {
+    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
       throw new Error("Token tidak valid atau sudah kedaluwarsa");
     }
     throw error;

@@ -4,6 +4,7 @@ import {
   UpdatePostRequest,
   CreateCommentRequest,
   CreateRepostRequest,
+  PostResponse,
 } from "../model/post.types";
 
 const userPublicSelect = {
@@ -30,17 +31,20 @@ const getPostInclude = (currentUserId?: number) => ({
   },
 });
 
-const transformPost = (post: any) => {
+const transformPost = (post: any): PostResponse => {
   const { likes, reposts, ...restOfPost } = post;
   return {
     ...restOfPost,
     isLiked: likes?.length > 0,
     isReposted: reposts?.length > 0,
+    createdAt: post.createdAt,
+    updatedAt: post.updatedAt,
+    isEdited: post.isEdited,
+    isPinned: post.isPinned,
   };
 };
 
 // Membuat postingan baru atau balasan.
-
 export const createPost = async (userId: number, data: PostPayload) => {
   const post = await prisma.post.create({
     data: {
@@ -51,7 +55,6 @@ export const createPost = async (userId: number, data: PostPayload) => {
     include: getPostInclude(userId),
   });
 
-  // Jika ini adalah balasan, increment commentCount di parent post
   if (post.parentPostId) {
     await prisma.post.update({
       where: { id: post.parentPostId },
@@ -63,7 +66,6 @@ export const createPost = async (userId: number, data: PostPayload) => {
 };
 
 // Mengambil semua postingan (timeline utama) dengan paginasi.
-
 export const getPosts = async (
   currentUserId?: number,
   limit = 10,
@@ -71,21 +73,15 @@ export const getPosts = async (
 ) => {
   const whereClause = { isDeleted: false, parentPostId: null };
 
-  const [posts, totalCount] = await prisma.$transaction([
-    prisma.post.findMany({
-      where: whereClause,
-      orderBy: { createdAt: "desc" },
-      include: getPostInclude(currentUserId),
-      take: limit,
-      skip: offset,
-    }),
-    prisma.post.count({ where: whereClause }),
-  ]);
+  const posts = await prisma.post.findMany({
+    where: whereClause,
+    orderBy: { createdAt: "desc" },
+    include: getPostInclude(currentUserId),
+    take: limit,
+    skip: offset,
+  });
 
-  return {
-    data: posts.map(transformPost),
-    total: totalCount,
-  };
+  return posts.map(transformPost); // Kembalikan array langsung
 };
 
 /**
@@ -96,7 +92,6 @@ export const getPostDetail = async (postId: number, currentUserId?: number) => {
     where: { id: postId, isDeleted: false },
     include: {
       ...getPostInclude(currentUserId),
-      // Untuk detail, kita ingin semua komentar
       comments: {
         where: { isDeleted: false },
         include: { user: { select: userPublicSelect } },
@@ -117,7 +112,6 @@ export const updatePost = async (
   postId: number,
   data: UpdatePostRequest
 ) => {
-  // Verifikasi bahwa post ada dan dimiliki oleh user yang benar
   const postToUpdate = await prisma.post.findFirst({
     where: { id: postId, userId, isDeleted: false },
   });
@@ -135,10 +129,10 @@ export const updatePost = async (
  */
 export const deletePost = async (userId: number, postId: number) => {
   const result = await prisma.post.updateMany({
-    where: { id: postId, userId }, // Hanya bisa hapus post milik sendiri
+    where: { id: postId, userId },
     data: { isDeleted: true },
   });
-  return result.count > 0; // Return true jika berhasil mengupdate (menghapus)
+  return result.count > 0;
 };
 
 /**
@@ -207,7 +201,6 @@ export const quotePost = async (
   postId: number,
   data: CreateRepostRequest
 ) => {
-  // Quote post selalu dianggap isQuotePost = true
   const repost = await prisma.repost.create({
     data: {
       userId,
