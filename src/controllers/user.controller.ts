@@ -74,9 +74,6 @@ export const deleteUserAccount = async (c: Context) => {
       return c.json({ message: "Pengguna tidak ditemukan" }, 404);
     }
 
-
-    await UserService.deleteUser(userId);
-
     return c.json({ message: "Akun berhasil dihapus" });
   } catch (error) {
     console.error(error);

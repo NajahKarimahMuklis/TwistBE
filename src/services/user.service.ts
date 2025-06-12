@@ -245,6 +245,11 @@ export class UserService {
     if (!existingUser) {
       return false; // user tidak ditemukan
     }
+    
+    await prisma.refreshToken.deleteMany({
+      where: { userId },
+    });
+  
 
     await prisma.user.delete({
       where: { id: userId },
