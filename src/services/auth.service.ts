@@ -1,5 +1,5 @@
 import { prisma } from "../application/database";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import { signJwt, verifyJwt } from "../utils/jwt";
 import {
   LoginInput,

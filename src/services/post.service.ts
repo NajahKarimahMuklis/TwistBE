@@ -1,3 +1,4 @@
+// post.service.ts
 import { prisma } from "../application/database";
 import {
   PostPayload,
@@ -37,10 +38,13 @@ const transformPost = (post: any): PostResponse => {
     ...restOfPost,
     isLiked: likes?.length > 0,
     isReposted: reposts?.length > 0,
-    createdAt: post.createdAt,
-    updatedAt: post.updatedAt,
-    isEdited: post.isEdited,
-    isPinned: post.isPinned,
+    likeCount: post._count.likes,
+    commentCount: post._count.comments,
+    repostCount: post._count.reposts,
+    createdAt: post.createdAt.toISOString(), // Pastikan format ISO
+    updatedAt: post.updatedAt?.toISOString() || null,
+    isEdited: post.isEdited || false,
+    isPinned: post.isPinned || false,
   };
 };
 
@@ -49,8 +53,9 @@ export const createPost = async (userId: number, data: PostPayload) => {
   const post = await prisma.post.create({
     data: {
       userId,
-      content: data.content,
+      content: data.content || "",
       parentPostId: data.parentPostId,
+      isDeleted: false,
     },
     include: getPostInclude(userId),
   });
@@ -81,7 +86,7 @@ export const getPosts = async (
     skip: offset,
   });
 
-  return posts.map(transformPost); // Kembalikan array langsung
+  return posts.map(transformPost);
 };
 
 /**
@@ -120,7 +125,8 @@ export const updatePost = async (
 
   return prisma.post.update({
     where: { id: postId },
-    data: { content: data.content, isEdited: true },
+    data: { content: data.content, isEdited: true, updatedAt: new Date() },
+    include: getPostInclude(userId),
   });
 };
 
@@ -129,7 +135,7 @@ export const updatePost = async (
  */
 export const deletePost = async (userId: number, postId: number) => {
   const result = await prisma.post.updateMany({
-    where: { id: postId, userId },
+    where: { id: postId, userId, isDeleted: false },
     data: { isDeleted: true },
   });
   return result.count > 0;
@@ -146,20 +152,18 @@ export const toggleLikePost = async (userId: number, postId: number) => {
 
     if (existingLike) {
       await tx.like.delete({ where: { id: existingLike.id } });
-      const updatedPost = await tx.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: { likeCount: { decrement: 1 } },
-        select: { likeCount: true },
       });
-      return { liked: false, likeCount: updatedPost.likeCount };
+      return false;
     } else {
       await tx.like.create({ data: { userId, postId } });
-      const updatedPost = await tx.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: { likeCount: { increment: 1 } },
-        select: { likeCount: true },
       });
-      return { liked: true, likeCount: updatedPost.likeCount };
+      return true;
     }
   });
 };
@@ -175,20 +179,18 @@ export const toggleRepost = async (userId: number, postId: number) => {
 
     if (existingRepost) {
       await tx.repost.delete({ where: { id: existingRepost.id } });
-      const updatedPost = await tx.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: { repostCount: { decrement: 1 } },
-        select: { repostCount: true },
       });
-      return { reposted: false, repostCount: updatedPost.repostCount };
+      return false;
     } else {
       await tx.repost.create({ data: { userId, postId, isQuotePost: false } });
-      const updatedPost = await tx.post.update({
+      await tx.post.update({
         where: { id: postId },
         data: { repostCount: { increment: 1 } },
-        select: { repostCount: true },
       });
-      return { reposted: true, repostCount: updatedPost.repostCount };
+      return true;
     }
   });
 };
@@ -223,14 +225,16 @@ export const quotePost = async (
 export const addComment = async (
   userId: number,
   postId: number,
-  data: CreateCommentRequest
+  content: string
 ) => {
   return prisma.$transaction(async (tx) => {
     const comment = await tx.comment.create({
       data: {
         userId,
         postId,
-        content: data.content,
+        content: content.trim(), // Pastikan konten tidak kosong
+        createdAt: new Date(), // Set createdAt secara eksplisit
+        isDeleted: false,
       },
       include: {
         user: { select: userPublicSelect },
@@ -242,7 +246,12 @@ export const addComment = async (
       data: { commentCount: { increment: 1 } },
     });
 
-    return comment;
+    return {
+      id: comment.id,
+      content: comment.content,
+      user: comment.user,
+      createdAt: comment.createdAt.toISOString(),
+    };
   });
 };
 
@@ -250,7 +259,7 @@ export const addComment = async (
  * Mengambil semua komentar dari sebuah postingan.
  */
 export const getPostComments = async (postId: number) => {
-  return prisma.comment.findMany({
+  const comments = await prisma.comment.findMany({
     where: { postId, isDeleted: false },
     orderBy: { createdAt: "asc" },
     include: {
@@ -259,4 +268,11 @@ export const getPostComments = async (postId: number) => {
       },
     },
   });
+
+  return comments.map((comment) => ({
+    id: comment.id,
+    content: comment.content || "No content", // Default jika null
+    user: comment.user,
+    createdAt: comment.createdAt.toISOString(),
+  }));
 };
